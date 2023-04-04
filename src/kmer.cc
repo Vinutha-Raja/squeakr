@@ -74,6 +74,21 @@ std::string Kmer::int_to_str(__int128_t kmer, uint64_t kmer_size)
 	return str;
 }
 
+std::string Kmer::int_to_str_lmer(__int128_t kmer, uint64_t kmer_size)
+{
+
+    char BASES[] = {'A', 'C', 'G', 'T'};
+	uint8_t base;
+	std::string str;
+	for (uint32_t i = kmer_size; i > 0; i--) {
+		base = (kmer >> (i*2-2)) & 3ULL;
+		char chr = BASES[base];
+		str.push_back(chr);
+	}
+	return str;
+}
+
+
 /* Return the reverse complement of a base */
 int Kmer::reverse_complement_base(int x) { return 3 - x; }
 

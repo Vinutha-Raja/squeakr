@@ -41,6 +41,7 @@
 #include "kmer.h"
 #include "reader.h"
 #include "util.h"
+#include "minimizer.h"
 
 #define BITMASK(nbits) ((nbits) == 64 ? 0xffffffffffffffff : (1ULL << (nbits)) \
 												- 1ULL)
@@ -78,6 +79,7 @@ static bool dump_local_qf_to_main(flush_object *obj)
 	return true;
 }
 
+bool lmer_flag;
 /* convert a chunk of the fastq file into kmers */
 bool reads_to_kmers(chunk &c, flush_object *obj)
 {
@@ -112,6 +114,13 @@ start_read:
 			}
 			first = first >> 2;
 			first_rev = Kmer::reverse_complement(first, obj->ksize);
+            if(!lmer_flag){
+                lmer_flag = true;
+                MinimizerScanner scanner(obj->ksize, 15, 0, true, 0);
+                scanner.LoadSequence(Kmer::int_to_str(first, obj->ksize), 0, obj->ksize);
+                uint64_t *mmp = scanner.NextMinimizer();
+                std::cout << "for kmer " << Kmer::int_to_str(first, obj->ksize) << " lmer is " << Kmer::int_to_str_lmer((__int128_t)*mmp, 15) << " given hash "  << *mmp<< std::endl;
+            }
 
 			if (Kmer::compare_kmers(first, first_rev))
 				item = first;

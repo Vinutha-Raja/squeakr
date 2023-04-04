@@ -44,13 +44,14 @@ squeakr:					$(OBJDIR)/kmer.o $(OBJDIR)/hashutil.o $(OBJDIR)/util.o \
 									$(OBJDIR)/gqf.o $(OBJDIR)/gqf_file.o \
 									$(OBJDIR)/partitioned_counter.o $(OBJDIR)/SqueakrFS.o \
 									$(OBJDIR)/count.o $(OBJDIR)/query.o $(OBJDIR)/innerprod.o \
-									$(OBJDIR)/list.o $(OBJDIR)/info.o $(OBJDIR)/squeakr.o
+									$(OBJDIR)/list.o $(OBJDIR)/info.o $(OBJDIR)/squeakr.o $(OBJDIR)/minimizer.o
 
 # dependencies between .o files and .h files
 
 $(OBJDIR)/squeakr.o:		$(LOC_SRC)/squeakr.cc
 $(OBJDIR)/count.o: 			$(LOC_INCLUDE)/gqf_cpp.h $(LOC_INCLUDE)/chunk.h \
 												$(LOC_INCLUDE)/kmer.h \
+												$(LOC_INCLUDE)/minimizer.h \
 												$(LOC_INCLUDE)/reader.h $(LOC_INCLUDE)/util.h \
 												$(LOC_INCLUDE)/SqueakrFS.h
 $(OBJDIR)/query.o: 			$(LOC_INCLUDE)/gqf_cpp.h $(LOC_INCLUDE)/kmer.h \
@@ -62,6 +63,8 @@ $(OBJDIR)/info.o: 		 	$(LOC_INCLUDE)/gqf_cpp.h $(LOC_INCLUDE)/kmer.h \
 												$(LOC_INCLUDE)/util.h
 $(OBJDIR)/kmer.o: 			$(LOC_SRC)/kmer.cc $(LOC_INCLUDE)/kmer.h
 $(OBJDIR)/util.o: 			$(LOC_SRC)/util.cc $(LOC_INCLUDE)/util.h
+
+$(OBJDIR)/minimizer.o: 			$(LOC_SRC)/minimizer.cc $(LOC_INCLUDE)/minimizer.h
 
 # dependencies between .o files and .cc (or .c) files
 $(OBJDIR)/gqf.o: 				$(LOC_SRC)/gqf/gqf.c $(LOC_INCLUDE)/gqf/gqf.h
