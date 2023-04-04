@@ -39,10 +39,10 @@ using std::vector;
         for (int i = 0; i < UINT8_MAX + 1; i++)
             lookup_table_[i] = UINT8_MAX;
         if (dna_) {
-            set_lookup_table_character('A', 0x00);
-            set_lookup_table_character('C', 0x01);
-            set_lookup_table_character('G', 0x02);
-            set_lookup_table_character('T', 0x03);
+            set_lookup_table_character('C', 0x00);
+            set_lookup_table_character('A', 0x01);
+            set_lookup_table_character('T', 0x02);
+            set_lookup_table_character('G', 0x03);
         } else {
             // Reduced alphabet uses 15-letter alphabet from AD Solis (2015),
             // in Proteins (doi:10.1002/prot.24936)
