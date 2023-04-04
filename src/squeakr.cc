@@ -105,6 +105,9 @@ int main ( int argc, char *argv[] ) {
 									"squeakr-exact (default is Squeakr approximate)",
 									required("-k","--kmer") & value("k-size", countopt.ksize) %
 									"length of k-mers to count",
+                                            required("-l","--lmer") & value("l-size", countopt.lsize) %
+                                                                      "length of minimizers, l-mers to count",
+
 									option("-c","--cutoff") & value("cutoff", countopt.cutoff) %
 									"only output k-mers with count greater than or equal to cutoff (default = 1)",
 									option("-n","--no-counts").set(countopt.contains_counts, 0) %

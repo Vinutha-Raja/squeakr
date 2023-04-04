@@ -74,6 +74,17 @@ std::string Kmer::int_to_str(__int128_t kmer, uint64_t kmer_size)
 	return str;
 }
 
+std::string Kmer::int_to_str(__int128_t kmer, uint64_t kmer_size, std::string &str)
+{
+    uint8_t base;
+    for (uint32_t i = kmer_size; i > 0; i--) {
+        base = (kmer >> (i*2-2)) & 3ULL;
+        char chr = Kmer::map_int(base);
+        str.push_back(chr);
+    }
+    return str;
+}
+
 std::string Kmer::int_to_str_lmer(__int128_t kmer, uint64_t kmer_size)
 {
 

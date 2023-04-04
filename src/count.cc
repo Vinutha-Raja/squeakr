@@ -53,7 +53,8 @@ typedef struct {
 	CQF<KeyObject> *main_cqf;
 	uint32_t count {0};
 	uint32_t ksize {28};
-	bool exact;
+    uint32_t lsize {15};
+    bool exact;
 	spdlog::logger* console{nullptr};
 } flush_object;
 
@@ -81,7 +82,7 @@ static bool dump_local_qf_to_main(flush_object *obj)
 
 bool lmer_flag;
 /* convert a chunk of the fastq file into kmers */
-bool reads_to_kmers(chunk &c, flush_object *obj)
+bool reads_to_kmers(chunk &c, flush_object *obj, MinimizerScanner &scanner)
 {
 	auto fs = c.get_reads();
 	auto fe = c.get_reads();
@@ -93,106 +94,36 @@ bool reads_to_kmers(chunk &c, flush_object *obj)
 		fe = static_cast<char*>(memchr(fs, '\n', end-fs)); // read the read
 		std::string read(fs, fe-fs);
 
-start_read:
 		if (read.length() < obj->ksize) // start with the next read if length is smaller than K
 			goto next_read;
 		{
-			__int128_t first = 0;
-			__int128_t first_rev = 0;
-			__int128_t item = 0;
-			for(uint32_t i = 0; i < obj->ksize; i++) { //First kmer
-				uint8_t curr = Kmer::map_base(read[i]);
-				if (curr > DNA_MAP::G) { // 'N' is encountered
-					if (i + 1 < read.length())
-						read = read.substr(i + 1, read.length());
-					else
-						goto next_read;
-					goto start_read;
-				}
-				first = first | curr;
-				first = first << 2;
-			}
-			first = first >> 2;
-			first_rev = Kmer::reverse_complement(first, obj->ksize);
-            if(!lmer_flag){
-                lmer_flag = true;
-                MinimizerScanner scanner(obj->ksize, 15, 0, true, 0);
-                scanner.LoadSequence(Kmer::int_to_str(first, obj->ksize), 0, obj->ksize);
-                uint64_t *mmp = scanner.NextMinimizer();
-                std::cout << "for kmer " << Kmer::int_to_str(first, obj->ksize) << " lmer is " << Kmer::int_to_str_lmer((__int128_t)*mmp, 15) << " given hash "  << *mmp<< std::endl;
+
+            scanner.LoadSequence(read);
+
+            uint64_t *mmp;
+            while ((mmp = scanner.NextMinimizer()) != nullptr){
+                KeyObject k(*mmp, 0, 1);
+
+                /*
+                 * first try and insert in the main QF.
+                 * If lock can't be acquired in the first attempt then
+                 * insert the item in the local QF.
+                 */
+                int ret = obj->main_cqf->insert(k, QF_TRY_ONCE_LOCK);
+                if (ret == QF_NO_SPACE) {
+                    obj->console->error("The CQF is full. Please rerun the with a larger size.");
+                    exit(1);
+                } else if (ret == -2) {
+                    obj->local_cqf->insert(k, QF_NO_LOCK);
+                    obj->count++;
+                    // check of the load factor of the local QF is more than 50%
+                    if (obj->count > 1ULL<<(QBITS_LOCAL_QF-1)) {
+                        if (!dump_local_qf_to_main(obj))
+                            return false;
+                        obj->count = 0;
+                    }
+                }
             }
-
-			if (Kmer::compare_kmers(first, first_rev))
-				item = first;
-			else
-				item = first_rev;
-
-			/*
-			 * first try and insert in the main QF.
-			 * If lock can't be acquired in the first attempt then
-			 * insert the item in the local QF.
-			 */
-			KeyObject k(item, 0, 1);
-			int ret = obj->main_cqf->insert(k, QF_TRY_ONCE_LOCK);
-			if (ret == QF_NO_SPACE) {
-				obj->console->error("The CQF is full. Please rerun the with a larger size.");
-				exit(1);
-			} else if (ret == -2) {
-				obj->local_cqf->insert(k, QF_NO_LOCK);
-				obj->count++;
-				// check of the load factor of the local QF is more than 50%
-				if (obj->count > 1ULL<<(QBITS_LOCAL_QF-1)) {
-					if (!dump_local_qf_to_main(obj))
-						return false;
-					obj->count = 0;
-				}
-			}
-
-			uint64_t next = (first << 2) & BITMASK(2 * obj->ksize);
-			uint64_t next_rev = first_rev >> 2;
-
-			for(uint32_t i = obj->ksize; i < read.length(); i++) { //next kmers
-				uint8_t curr = Kmer::map_base(read[i]);
-				if (curr > DNA_MAP::G) { // 'N' is encountered
-					if (i + 1 < read.length())
-						read = read.substr(i + 1, read.length());
-					else
-						goto next_read;
-					goto start_read;
-				}
-				next |= curr;
-				uint64_t tmp = Kmer::reverse_complement_base(curr);
-				tmp <<= (obj->ksize * 2 - 2);
-				next_rev = next_rev | tmp;
-				if (Kmer::compare_kmers(next, next_rev))
-					item = next;
-				else
-					item = next_rev;
-
-				/*
-				 * first try and insert in the main QF.
-				 * If lock can't be accuired in the first attempt then
-				 * insert the item in the local QF.
-				 */
-				KeyObject k(item, 0, 1);
-				ret = obj->main_cqf->insert(k, QF_TRY_ONCE_LOCK);
-				if (ret == QF_NO_SPACE) {
-					obj->console->error("The CQF is full. Please rerun the with a larger size.");
-					exit(1);
-				} else if (ret == -2) {
-					obj->local_cqf->insert(k, QF_NO_LOCK);
-					obj->count++;
-					// check of the load factor of the local QF is more than 50%
-					if (obj->count > 1ULL<<(QBITS_LOCAL_QF-1)) {
-						if (!dump_local_qf_to_main(obj))
-							return false;
-						obj->count = 0;
-					}
-				}
-
-				next = (next << 2) & BITMASK(2*obj->ksize);
-				next_rev = next_rev >> 2;
-			}
 		}
 
 next_read:
@@ -213,13 +144,13 @@ next_read:
 static bool fastq_to_uint64kmers_prod(flush_object* obj)
 {
 	file_pointer* fp;
-
+    MinimizerScanner scanner(obj->ksize, obj->lsize, 0, true, 0);
 	while (num_files) {
 		while (ip_files.pop(fp)) {
 			if (reader::fastq_read_parts(fp->mode, fp)) {
 				ip_files.push(fp);
 				chunk c(fp->part, fp->size);
-				if (!reads_to_kmers(c, obj)) {
+				if (!reads_to_kmers(c, obj, scanner)) {
 					obj->console->error("Insertion in the CQF failed.");
 					abort();
 				}
@@ -269,7 +200,7 @@ int count_main(CountOpts &opts)
 	enum qf_hashmode hash = QF_HASH_DEFAULT;
 	int num_hash_bits = opts.qbits+8;	// we use 8 bits for remainders in the main QF
 	if (opts.exact) {
-		num_hash_bits = 2*opts.ksize; // Each base 2 bits.
+		num_hash_bits = 2*opts.lsize; // Each base 2 bits.
 		hash = QF_HASH_INVERTIBLE;
 	}
 
@@ -326,6 +257,7 @@ int count_main(CountOpts &opts)
 		obj->local_cqf = &local_cqfs[i];
 		obj->main_cqf = &cqf;
 		obj->ksize = opts.ksize;
+        obj->lsize = opts.lsize;
 		obj->exact = opts.exact;
 		obj->count = 0;
 		obj->console = console;

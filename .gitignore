@@ -27,3 +27,9 @@
 *.exe
 *.out
 *.app
+/.idea/.gitignore
+/.idea/misc.xml
+/data/res.txt
+/squeakr
+/data/tmp.squeakr
+/.idea/vcs.xml
