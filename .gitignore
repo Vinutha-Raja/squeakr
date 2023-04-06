@@ -3,7 +3,7 @@
 *.lo
 *.o
 *.obj
-
+data/
 # Precompiled Headers
 *.gch
 *.pch

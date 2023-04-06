@@ -51,6 +51,7 @@
 typedef struct {
 	CQF<KeyObject> *local_cqf;
 	CQF<KeyObject> *main_cqf;
+
 	uint32_t count {0};
 	uint32_t ksize {28};
     uint32_t lsize {15};
@@ -58,6 +59,7 @@ typedef struct {
 	spdlog::logger* console{nullptr};
 } flush_object;
 
+std::unordered_map<std::string , int> myMap;
 /*create a multi-prod multi-cons queue for storing the chunk of fastq file.*/
 boost::lockfree::queue<file_pointer*, boost::lockfree::fixed_sized<true> > ip_files(64);
 boost::atomic<int> num_files {0};
@@ -102,27 +104,8 @@ bool reads_to_kmers(chunk &c, flush_object *obj, MinimizerScanner &scanner)
 
             uint64_t *mmp;
             while ((mmp = scanner.NextMinimizer()) != nullptr){
-                KeyObject k(*mmp, 0, 1);
+                myMap[Kmer::int_to_str(*mmp, obj->lsize)]++;
 
-                /*
-                 * first try and insert in the main QF.
-                 * If lock can't be acquired in the first attempt then
-                 * insert the item in the local QF.
-                 */
-                int ret = obj->main_cqf->insert(k, QF_TRY_ONCE_LOCK);
-                if (ret == QF_NO_SPACE) {
-                    obj->console->error("The CQF is full. Please rerun the with a larger size.");
-                    exit(1);
-                } else if (ret == -2) {
-                    obj->local_cqf->insert(k, QF_NO_LOCK);
-                    obj->count++;
-                    // check of the load factor of the local QF is more than 50%
-                    if (obj->count > 1ULL<<(QBITS_LOCAL_QF-1)) {
-                        if (!dump_local_qf_to_main(obj))
-                            return false;
-                        obj->count = 0;
-                    }
-                }
             }
 		}
 
@@ -180,6 +163,16 @@ static bool fastq_to_uint64kmers_prod(flush_object* obj)
 	}
 
 	return true;
+}
+
+std::unordered_map<std::string, int> mergeHashmaps(std::vector<std::unordered_map<std::string, int>>& hashmaps) {
+    std::unordered_map<std::string, int> mergedHashmap;
+    for (const auto& hashmap : hashmaps) {
+        for (const auto& [key, value] : hashmap) {
+            mergedHashmap[key] += value;
+        }
+    }
+    return mergedHashmap;
 }
 
 /* main method */
@@ -243,132 +236,159 @@ int count_main(CountOpts &opts)
 	std::string ds_file = opts.output_file;
 
 	//Initialize the main  QF
-	CQF<KeyObject> cqf(opts.qbits, num_hash_bits, hash, SEED);
-	if (opts.numthreads == 1)
-		cqf.set_auto_resize();
-	CQF<KeyObject> *local_cqfs = (CQF<KeyObject>*)calloc(MAX_NUM_THREADS,
-																											 sizeof(CQF<KeyObject>));
+//	CQF<KeyObject> cqf(opts.qbits, num_hash_bits, hash, SEED);
+//	if (opts.numthreads == 1)
+//		cqf.set_auto_resize();
+//	CQF<KeyObject> *local_cqfs = (CQF<KeyObject>*)calloc(MAX_NUM_THREADS,
+//																											 sizeof(CQF<KeyObject>));
 
 	boost::thread_group prod_threads;
 
+    std::vector<std::unordered_map<std::string, int>> hashmaps;
 	for (int i = 0; i < opts.numthreads; i++) {
-		local_cqfs[i] = CQF<KeyObject>(QBITS_LOCAL_QF, num_hash_bits, hash, SEED);
+//		local_cqfs[i] = CQF<KeyObject>(QBITS_LOCAL_QF, num_hash_bits, hash, SEED);
 		flush_object* obj = (flush_object*)malloc(sizeof(flush_object));
-		obj->local_cqf = &local_cqfs[i];
-		obj->main_cqf = &cqf;
+//		obj->local_cqf = &local_cqfs[i];
+//		obj->main_cqf = &cqf;
 		obj->ksize = opts.ksize;
         obj->lsize = opts.lsize;
 		obj->exact = opts.exact;
 		obj->count = 0;
 		obj->console = console;
 		prod_threads.add_thread(new boost::thread(fastq_to_uint64kmers_prod,
-																							obj));
+																			obj));
 	}
+
+
+
 
 	console->info("Reading from the fastq file and inserting in the CQF.");
 	gettimeofday(&start1, &tzp);
 	prod_threads.join_all();
 
-	// Resize the CQF if:
-	//      there is cutoff value greater than 1
-	//      the final CQF doesn't need counts
-	//      the default size if used
-	if (opts.cutoff > 1 || opts.contains_counts == 0 || !opts.setqbits) {
-		if (opts.cutoff > 1)
-			console->info("Filtering k-mers based on the cutoff.");
-		else if (opts.contains_counts == 0)
-			console->info("Removing counts from the CQF.");
-		else if (!opts.setqbits)
-			console->info("Trying to compress the final CQF.");
+    std::unordered_map<std::string, int> merged_hashmap = mergeHashmaps(hashmaps);
 
-		uint64_t num_kmers{0}, estimated_size{0}, log_estimated_size{0};
-		CQF<KeyObject>::Iterator it = cqf.begin();
-		while (!it.done()) {
-			KeyObject hash = it.get_cur_hash();
-			if (hash.count >= (uint32_t)opts.cutoff)
-				num_kmers++;
-			//console->info("hash fraction: {}", k.key / (float)cqf.range());
-			if (cqf.get_unique_index(hash, QF_KEY_IS_HASH) / (float)(1ULL <<
-																														opts.qbits) >
-					0.05) {
-				estimated_size = num_kmers * (cqf.range() / static_cast<__uint128_t>(hash.key));
-				//console->info("estimated size: {}", estimated_size);
-				if (opts.contains_counts == 1)
-					estimated_size *= 3;    // to account for counts.
-				log_estimated_size = ceil(log2(estimated_size));
-				uint64_t total_slots = 1ULL << log_estimated_size;
-				//console->info("estimated size after ceiling: {}", 1ULL << log_estimated_size);
-				if ((total_slots-estimated_size)/(float)estimated_size < 0.1)
-					log_estimated_size += 1;
-				//console->info("estimated size after ceiling: {}", 1ULL << log_estimated_size);
-				break;
-			}
-			++it;
-		}
-		console->info("Estimated size of the final CQF: {}", log_estimated_size);
-		if (opts.cutoff > 1 || opts.contains_counts == 0 || cqf.numslots() > (1ULL
-																																					<<
-																																					log_estimated_size))
-		{
-			CQF<KeyObject> filtered_cqf(log_estimated_size, num_hash_bits, hash, SEED);
-			filtered_cqf.set_auto_resize();
-			it = cqf.begin();
-			uint64_t max_cnt = 0;
-			while (!it.done()) {
-				KeyObject hash = it.get_cur_hash();
-				if (hash.count >= (uint32_t)opts.cutoff) {
-					int ret;
-					if (opts.contains_counts == 1)
-						ret = filtered_cqf.insert(hash, QF_NO_LOCK | QF_KEY_IS_HASH);
-					else {
-						hash.count = 1;
-						ret = filtered_cqf.insert(hash, QF_NO_LOCK | QF_KEY_IS_HASH);
-					}
-					if (ret == QF_NO_SPACE) {
-						console->error("The CQF is full. Estimated size of the final CQF is wrong.");
-						exit(1);
-					}
-				}
-				if (max_cnt < hash.count)
-					max_cnt = hash.count;
-				++it;
-			}
-			cqf = filtered_cqf;
-		}
-	}
-	console->info("Calculating frequency distribution:");
-	gettimeofday(&start2, &tzp);
-	uint64_t max_cnt = 0;
-	CQF<KeyObject>::Iterator it = cqf.begin();
-	while (!it.done()) {
-		KeyObject hash = it.get_cur_hash();
-		if (max_cnt < hash.count)
-			max_cnt = hash.count;
-		++it;
-	}
-	gettimeofday(&end2, &tzp);
-	print_time_elapsed("Iteration:", &start2, &end2, console);
 
-	// serialize the CQF to disk.
-	cqf.serialize(ds_file);
-	gettimeofday(&end1, &tzp);
-	print_time_elapsed("Counting:", &start1, &end1, console);
+    ds_file.append("-");
+    // Create an output file stream and open a file
+    ds_file.append(std::to_string(opts.lsize));
+    ds_file.append(".txt");
+    std::ofstream outputFile(ds_file);
 
-	console->info("Maximum freq: {}", max_cnt);
+    // Check if the file was opened successfully
+    if (!outputFile.is_open()) {
+        std::cout << "Failed to open file" << std::endl;
+        return 1;
+    }
 
-	console->info("Num distinct elem: {}", cqf.dist_elts());
-	console->info("Total num elems: {}", cqf.total_elts());
+    for (const auto& [key, value] : myMap) {
+        if(value > opts.cutoff)
+        outputFile << key << ": " << value << endl;
+    }
 
-	// seek to the end of the file and write the k-mer size
-	std::ofstream squeakr_file(ds_file, std::ofstream::out |
-														 std::ofstream::app | std::ofstream::binary);
-	squeakr_file.seekp(0, squeakr_file.end);
-	squeakrconfig config;
-	config.kmer_size = opts.ksize;
-	config.cutoff = opts.cutoff;
-	config.contains_counts = opts.contains_counts;
-	squeakr_file.write((const char*)&config, sizeof(config));
-	squeakr_file.close();
+    // Close the file
+    outputFile.close();
+//
+//	// Resize the CQF if:
+//	//      there is cutoff value greater than 1
+//	//      the final CQF doesn't need counts
+//	//      the default size if used
+//	if (opts.cutoff > 1 || opts.contains_counts == 0 || !opts.setqbits) {
+//		if (opts.cutoff > 1)
+//			console->info("Filtering k-mers based on the cutoff.");
+//		else if (opts.contains_counts == 0)
+//			console->info("Removing counts from the CQF.");
+//		else if (!opts.setqbits)
+//			console->info("Trying to compress the final CQF.");
+//
+//		uint64_t num_kmers{0}, estimated_size{0}, log_estimated_size{0};
+//		CQF<KeyObject>::Iterator it = cqf.begin();
+//		while (!it.done()) {
+//			KeyObject hash = it.get_cur_hash();
+//			if (hash.count >= (uint32_t)opts.cutoff)
+//				num_kmers++;
+//			//console->info("hash fraction: {}", k.key / (float)cqf.range());
+//			if (cqf.get_unique_index(hash, QF_KEY_IS_HASH) / (float)(1ULL <<
+//																														opts.qbits) >
+//					0.05) {
+//				estimated_size = num_kmers * (cqf.range() / static_cast<__uint128_t>(hash.key));
+//				//console->info("estimated size: {}", estimated_size);
+//				if (opts.contains_counts == 1)
+//					estimated_size *= 3;    // to account for counts.
+//				log_estimated_size = ceil(log2(estimated_size));
+//				uint64_t total_slots = 1ULL << log_estimated_size;
+//				//console->info("estimated size after ceiling: {}", 1ULL << log_estimated_size);
+//				if ((total_slots-estimated_size)/(float)estimated_size < 0.1)
+//					log_estimated_size += 1;
+//				//console->info("estimated size after ceiling: {}", 1ULL << log_estimated_size);
+//				break;
+//			}
+//			++it;
+//		}
+//		console->info("Estimated size of the final CQF: {}", log_estimated_size);
+//		if (opts.cutoff > 1 || opts.contains_counts == 0 || cqf.numslots() > (1ULL
+//																																					<<
+//																																					log_estimated_size))
+//		{
+//			CQF<KeyObject> filtered_cqf(log_estimated_size, num_hash_bits, hash, SEED);
+//			filtered_cqf.set_auto_resize();
+//			it = cqf.begin();
+//			uint64_t max_cnt = 0;
+//			while (!it.done()) {
+//				KeyObject hash = it.get_cur_hash();
+//				if (hash.count >= (uint32_t)opts.cutoff) {
+//					int ret;
+//					if (opts.contains_counts == 1)
+//						ret = filtered_cqf.insert(hash, QF_NO_LOCK | QF_KEY_IS_HASH);
+//					else {
+//						hash.count = 1;
+//						ret = filtered_cqf.insert(hash, QF_NO_LOCK | QF_KEY_IS_HASH);
+//					}
+//					if (ret == QF_NO_SPACE) {
+//						console->error("The CQF is full. Estimated size of the final CQF is wrong.");
+//						exit(1);
+//					}
+//				}
+//				if (max_cnt < hash.count)
+//					max_cnt = hash.count;
+//				++it;
+//			}
+//			cqf = filtered_cqf;
+//		}
+//	}
+//	console->info("Calculating frequency distribution:");
+//	gettimeofday(&start2, &tzp);
+//	uint64_t max_cnt = 0;
+//	CQF<KeyObject>::Iterator it = cqf.begin();
+//	while (!it.done()) {
+//		KeyObject hash = it.get_cur_hash();
+//		if (max_cnt < hash.count)
+//			max_cnt = hash.count;
+//		++it;
+//	}
+//	gettimeofday(&end2, &tzp);
+//	print_time_elapsed("Iteration:", &start2, &end2, console);
+//
+//	// serialize the CQF to disk.
+//	cqf.serialize(ds_file);
+//	gettimeofday(&end1, &tzp);
+//	print_time_elapsed("Counting:", &start1, &end1, console);
+//
+//	console->info("Maximum freq: {}", max_cnt);
+//
+//	console->info("Num distinct elem: {}", cqf.dist_elts());
+//	console->info("Total num elems: {}", cqf.total_elts());
+//
+//	// seek to the end of the file and write the k-mer size
+//	std::ofstream squeakr_file(ds_file, std::ofstream::out |
+//														 std::ofstream::app | std::ofstream::binary);
+//	squeakr_file.seekp(0, squeakr_file.end);
+//	squeakrconfig config;
+//	config.kmer_size = opts.ksize;
+//	config.cutoff = opts.cutoff;
+//	config.contains_counts = opts.contains_counts;
+//	squeakr_file.write((const char*)&config, sizeof(config));
+//	squeakr_file.close();
 
 	return 0;
 }
