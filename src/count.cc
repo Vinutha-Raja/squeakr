@@ -59,7 +59,7 @@ typedef struct {
 	spdlog::logger* console{nullptr};
 } flush_object;
 
-std::unordered_map<std::string , int> myMap;
+std::unordered_set<std::string> lmerSet;
 /*create a multi-prod multi-cons queue for storing the chunk of fastq file.*/
 boost::lockfree::queue<file_pointer*, boost::lockfree::fixed_sized<true> > ip_files(64);
 boost::atomic<int> num_files {0};
@@ -104,8 +104,7 @@ bool reads_to_kmers(chunk &c, flush_object *obj, MinimizerScanner &scanner)
 
             uint64_t *mmp;
             while ((mmp = scanner.NextMinimizer()) != nullptr){
-                myMap[Kmer::int_to_str(*mmp, obj->lsize)]++;
-
+                lmerSet.insert(Kmer::int_to_str(*mmp, obj->lsize));
             }
 		}
 
@@ -165,15 +164,6 @@ static bool fastq_to_uint64kmers_prod(flush_object* obj)
 	return true;
 }
 
-std::unordered_map<std::string, int> mergeHashmaps(std::vector<std::unordered_map<std::string, int>>& hashmaps) {
-    std::unordered_map<std::string, int> mergedHashmap;
-    for (const auto& hashmap : hashmaps) {
-        for (const auto& [key, value] : hashmap) {
-            mergedHashmap[key] += value;
-        }
-    }
-    return mergedHashmap;
-}
 
 /* main method */
 int count_main(CountOpts &opts)
@@ -244,7 +234,6 @@ int count_main(CountOpts &opts)
 
 	boost::thread_group prod_threads;
 
-    std::vector<std::unordered_map<std::string, int>> hashmaps;
 	for (int i = 0; i < opts.numthreads; i++) {
 //		local_cqfs[i] = CQF<KeyObject>(QBITS_LOCAL_QF, num_hash_bits, hash, SEED);
 		flush_object* obj = (flush_object*)malloc(sizeof(flush_object));
@@ -259,17 +248,11 @@ int count_main(CountOpts &opts)
 																			obj));
 	}
 
-
-
-
 	console->info("Reading from the fastq file and inserting in the CQF.");
 	gettimeofday(&start1, &tzp);
 	prod_threads.join_all();
 
-    std::unordered_map<std::string, int> merged_hashmap = mergeHashmaps(hashmaps);
-
-
-    ds_file.append("-");
+    ds_file.append("-set-");
     // Create an output file stream and open a file
     ds_file.append(std::to_string(opts.lsize));
     ds_file.append(".txt");
@@ -281,9 +264,8 @@ int count_main(CountOpts &opts)
         return 1;
     }
 
-    for (const auto& [key, value] : myMap) {
-        if(value > opts.cutoff)
-        outputFile << key << ": " << value << endl;
+    for (const std::string& x : lmerSet) {
+        outputFile << x << std::endl;
     }
 
     // Close the file
