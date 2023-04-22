@@ -59,7 +59,7 @@ typedef struct {
 	spdlog::logger* console{nullptr};
 } flush_object;
 
-std::unordered_set<std::string> lmerSet;
+std::set<std::string> lmerSet;
 /*create a multi-prod multi-cons queue for storing the chunk of fastq file.*/
 boost::lockfree::queue<file_pointer*, boost::lockfree::fixed_sized<true> > ip_files(64);
 boost::atomic<int> num_files {0};
