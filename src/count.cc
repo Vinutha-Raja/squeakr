@@ -41,6 +41,7 @@
 #include "kmer.h"
 #include "reader.h"
 #include "util.h"
+#include "minimizer.h"
 
 #define BITMASK(nbits) ((nbits) == 64 ? 0xffffffffffffffff : (1ULL << (nbits)) \
 												- 1ULL)
@@ -50,12 +51,15 @@
 typedef struct {
 	CQF<KeyObject> *local_cqf;
 	CQF<KeyObject> *main_cqf;
+
 	uint32_t count {0};
 	uint32_t ksize {28};
-	bool exact;
+    uint32_t lsize {15};
+    bool exact;
 	spdlog::logger* console{nullptr};
 } flush_object;
 
+std::set<std::string> lmerSet;
 /*create a multi-prod multi-cons queue for storing the chunk of fastq file.*/
 boost::lockfree::queue<file_pointer*, boost::lockfree::fixed_sized<true> > ip_files(64);
 boost::atomic<int> num_files {0};
@@ -78,8 +82,9 @@ static bool dump_local_qf_to_main(flush_object *obj)
 	return true;
 }
 
+bool lmer_flag;
 /* convert a chunk of the fastq file into kmers */
-bool reads_to_kmers(chunk &c, flush_object *obj)
+bool reads_to_kmers(chunk &c, flush_object *obj, MinimizerScanner &scanner)
 {
 	auto fs = c.get_reads();
 	auto fe = c.get_reads();
@@ -91,99 +96,16 @@ bool reads_to_kmers(chunk &c, flush_object *obj)
 		fe = static_cast<char*>(memchr(fs, '\n', end-fs)); // read the read
 		std::string read(fs, fe-fs);
 
-start_read:
 		if (read.length() < obj->ksize) // start with the next read if length is smaller than K
 			goto next_read;
 		{
-			__int128_t first = 0;
-			__int128_t first_rev = 0;
-			__int128_t item = 0;
-			for(uint32_t i = 0; i < obj->ksize; i++) { //First kmer
-				uint8_t curr = Kmer::map_base(read[i]);
-				if (curr > DNA_MAP::G) { // 'N' is encountered
-					if (i + 1 < read.length())
-						read = read.substr(i + 1, read.length());
-					else
-						goto next_read;
-					goto start_read;
-				}
-				first = first | curr;
-				first = first << 2;
-			}
-			first = first >> 2;
-			first_rev = Kmer::reverse_complement(first, obj->ksize);
 
-			if (Kmer::compare_kmers(first, first_rev))
-				item = first;
-			else
-				item = first_rev;
+            scanner.LoadSequence(read);
 
-			/*
-			 * first try and insert in the main QF.
-			 * If lock can't be acquired in the first attempt then
-			 * insert the item in the local QF.
-			 */
-			KeyObject k(item, 0, 1);
-			int ret = obj->main_cqf->insert(k, QF_TRY_ONCE_LOCK);
-			if (ret == QF_NO_SPACE) {
-				obj->console->error("The CQF is full. Please rerun the with a larger size.");
-				exit(1);
-			} else if (ret == -2) {
-				obj->local_cqf->insert(k, QF_NO_LOCK);
-				obj->count++;
-				// check of the load factor of the local QF is more than 50%
-				if (obj->count > 1ULL<<(QBITS_LOCAL_QF-1)) {
-					if (!dump_local_qf_to_main(obj))
-						return false;
-					obj->count = 0;
-				}
-			}
-
-			uint64_t next = (first << 2) & BITMASK(2 * obj->ksize);
-			uint64_t next_rev = first_rev >> 2;
-
-			for(uint32_t i = obj->ksize; i < read.length(); i++) { //next kmers
-				uint8_t curr = Kmer::map_base(read[i]);
-				if (curr > DNA_MAP::G) { // 'N' is encountered
-					if (i + 1 < read.length())
-						read = read.substr(i + 1, read.length());
-					else
-						goto next_read;
-					goto start_read;
-				}
-				next |= curr;
-				uint64_t tmp = Kmer::reverse_complement_base(curr);
-				tmp <<= (obj->ksize * 2 - 2);
-				next_rev = next_rev | tmp;
-				if (Kmer::compare_kmers(next, next_rev))
-					item = next;
-				else
-					item = next_rev;
-
-				/*
-				 * first try and insert in the main QF.
-				 * If lock can't be accuired in the first attempt then
-				 * insert the item in the local QF.
-				 */
-				KeyObject k(item, 0, 1);
-				ret = obj->main_cqf->insert(k, QF_TRY_ONCE_LOCK);
-				if (ret == QF_NO_SPACE) {
-					obj->console->error("The CQF is full. Please rerun the with a larger size.");
-					exit(1);
-				} else if (ret == -2) {
-					obj->local_cqf->insert(k, QF_NO_LOCK);
-					obj->count++;
-					// check of the load factor of the local QF is more than 50%
-					if (obj->count > 1ULL<<(QBITS_LOCAL_QF-1)) {
-						if (!dump_local_qf_to_main(obj))
-							return false;
-						obj->count = 0;
-					}
-				}
-
-				next = (next << 2) & BITMASK(2*obj->ksize);
-				next_rev = next_rev >> 2;
-			}
+            uint64_t *mmp;
+            while ((mmp = scanner.NextMinimizer()) != nullptr){
+                lmerSet.insert(Kmer::int_to_str(*mmp, obj->lsize));
+            }
 		}
 
 next_read:
@@ -204,13 +126,13 @@ next_read:
 static bool fastq_to_uint64kmers_prod(flush_object* obj)
 {
 	file_pointer* fp;
-
+    MinimizerScanner scanner(obj->ksize, obj->lsize, 0, true, 0);
 	while (num_files) {
 		while (ip_files.pop(fp)) {
 			if (reader::fastq_read_parts(fp->mode, fp)) {
 				ip_files.push(fp);
 				chunk c(fp->part, fp->size);
-				if (!reads_to_kmers(c, obj)) {
+				if (!reads_to_kmers(c, obj, scanner)) {
 					obj->console->error("Insertion in the CQF failed.");
 					abort();
 				}
@@ -242,6 +164,7 @@ static bool fastq_to_uint64kmers_prod(flush_object* obj)
 	return true;
 }
 
+
 /* main method */
 int count_main(CountOpts &opts)
 {
@@ -260,7 +183,7 @@ int count_main(CountOpts &opts)
 	enum qf_hashmode hash = QF_HASH_DEFAULT;
 	int num_hash_bits = opts.qbits+8;	// we use 8 bits for remainders in the main QF
 	if (opts.exact) {
-		num_hash_bits = 2*opts.ksize; // Each base 2 bits.
+		num_hash_bits = 2*opts.lsize; // Each base 2 bits.
 		hash = QF_HASH_INVERTIBLE;
 	}
 
@@ -302,132 +225,41 @@ int count_main(CountOpts &opts)
 
 	std::string ds_file = opts.output_file;
 
-	//Initialize the main  QF
-	CQF<KeyObject> cqf(opts.qbits, num_hash_bits, hash, SEED);
-	if (opts.numthreads == 1)
-		cqf.set_auto_resize();
-	CQF<KeyObject> *local_cqfs = (CQF<KeyObject>*)calloc(MAX_NUM_THREADS,
-																											 sizeof(CQF<KeyObject>));
-
 	boost::thread_group prod_threads;
 
 	for (int i = 0; i < opts.numthreads; i++) {
-		local_cqfs[i] = CQF<KeyObject>(QBITS_LOCAL_QF, num_hash_bits, hash, SEED);
 		flush_object* obj = (flush_object*)malloc(sizeof(flush_object));
-		obj->local_cqf = &local_cqfs[i];
-		obj->main_cqf = &cqf;
 		obj->ksize = opts.ksize;
+        obj->lsize = opts.lsize;
 		obj->exact = opts.exact;
 		obj->count = 0;
 		obj->console = console;
 		prod_threads.add_thread(new boost::thread(fastq_to_uint64kmers_prod,
-																							obj));
+																			obj));
 	}
 
 	console->info("Reading from the fastq file and inserting in the CQF.");
 	gettimeofday(&start1, &tzp);
 	prod_threads.join_all();
 
-	// Resize the CQF if:
-	//      there is cutoff value greater than 1
-	//      the final CQF doesn't need counts
-	//      the default size if used
-	if (opts.cutoff > 1 || opts.contains_counts == 0 || !opts.setqbits) {
-		if (opts.cutoff > 1)
-			console->info("Filtering k-mers based on the cutoff.");
-		else if (opts.contains_counts == 0)
-			console->info("Removing counts from the CQF.");
-		else if (!opts.setqbits)
-			console->info("Trying to compress the final CQF.");
+    ds_file.append("-set-");
+    // Create an output file stream and open a file
+    ds_file.append(std::to_string(opts.lsize));
+    ds_file.append(".txt");
+    std::ofstream outputFile(ds_file);
 
-		uint64_t num_kmers{0}, estimated_size{0}, log_estimated_size{0};
-		CQF<KeyObject>::Iterator it = cqf.begin();
-		while (!it.done()) {
-			KeyObject hash = it.get_cur_hash();
-			if (hash.count >= (uint32_t)opts.cutoff)
-				num_kmers++;
-			//console->info("hash fraction: {}", k.key / (float)cqf.range());
-			if (cqf.get_unique_index(hash, QF_KEY_IS_HASH) / (float)(1ULL <<
-																														opts.qbits) >
-					0.05) {
-				estimated_size = num_kmers * (cqf.range() / static_cast<__uint128_t>(hash.key));
-				//console->info("estimated size: {}", estimated_size);
-				if (opts.contains_counts == 1)
-					estimated_size *= 3;    // to account for counts.
-				log_estimated_size = ceil(log2(estimated_size));
-				uint64_t total_slots = 1ULL << log_estimated_size;
-				//console->info("estimated size after ceiling: {}", 1ULL << log_estimated_size);
-				if ((total_slots-estimated_size)/(float)estimated_size < 0.1)
-					log_estimated_size += 1;
-				//console->info("estimated size after ceiling: {}", 1ULL << log_estimated_size);
-				break;
-			}
-			++it;
-		}
-		console->info("Estimated size of the final CQF: {}", log_estimated_size);
-		if (opts.cutoff > 1 || opts.contains_counts == 0 || cqf.numslots() > (1ULL
-																																					<<
-																																					log_estimated_size))
-		{
-			CQF<KeyObject> filtered_cqf(log_estimated_size, num_hash_bits, hash, SEED);
-			filtered_cqf.set_auto_resize();
-			it = cqf.begin();
-			uint64_t max_cnt = 0;
-			while (!it.done()) {
-				KeyObject hash = it.get_cur_hash();
-				if (hash.count >= (uint32_t)opts.cutoff) {
-					int ret;
-					if (opts.contains_counts == 1)
-						ret = filtered_cqf.insert(hash, QF_NO_LOCK | QF_KEY_IS_HASH);
-					else {
-						hash.count = 1;
-						ret = filtered_cqf.insert(hash, QF_NO_LOCK | QF_KEY_IS_HASH);
-					}
-					if (ret == QF_NO_SPACE) {
-						console->error("The CQF is full. Estimated size of the final CQF is wrong.");
-						exit(1);
-					}
-				}
-				if (max_cnt < hash.count)
-					max_cnt = hash.count;
-				++it;
-			}
-			cqf = filtered_cqf;
-		}
-	}
-	console->info("Calculating frequency distribution:");
-	gettimeofday(&start2, &tzp);
-	uint64_t max_cnt = 0;
-	CQF<KeyObject>::Iterator it = cqf.begin();
-	while (!it.done()) {
-		KeyObject hash = it.get_cur_hash();
-		if (max_cnt < hash.count)
-			max_cnt = hash.count;
-		++it;
-	}
-	gettimeofday(&end2, &tzp);
-	print_time_elapsed("Iteration:", &start2, &end2, console);
+    // Check if the file was opened successfully
+    if (!outputFile.is_open()) {
+        std::cout << "Failed to open file" << std::endl;
+        return 1;
+    }
 
-	// serialize the CQF to disk.
-	cqf.serialize(ds_file);
-	gettimeofday(&end1, &tzp);
-	print_time_elapsed("Counting:", &start1, &end1, console);
+    for (const std::string& x : lmerSet) {
+        outputFile << x << std::endl;
+    }
 
-	console->info("Maximum freq: {}", max_cnt);
-
-	console->info("Num distinct elem: {}", cqf.dist_elts());
-	console->info("Total num elems: {}", cqf.total_elts());
-
-	// seek to the end of the file and write the k-mer size
-	std::ofstream squeakr_file(ds_file, std::ofstream::out |
-														 std::ofstream::app | std::ofstream::binary);
-	squeakr_file.seekp(0, squeakr_file.end);
-	squeakrconfig config;
-	config.kmer_size = opts.ksize;
-	config.cutoff = opts.cutoff;
-	config.contains_counts = opts.contains_counts;
-	squeakr_file.write((const char*)&config, sizeof(config));
-	squeakr_file.close();
+    // Close the file
+    outputFile.close();
 
 	return 0;
 }

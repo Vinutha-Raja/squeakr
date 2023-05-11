@@ -18,6 +18,7 @@ class CountOpts {
 	public:
 		int exact {0};
 		int ksize;
+        int lsize;
 		int cutoff {1};
 		int contains_counts{1};
 		int qbits {28};
